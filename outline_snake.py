@@ -8,6 +8,7 @@ import unittest
 
 from collections import deque
 from functools import partial
+from operator import attrgetter
 
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     import pygame
@@ -100,6 +101,7 @@ class Snake:
         :param body: iterable of rects.
         """
         self.body = list(body)
+        assert len(self.body) > 1
         sizes = set(rect.size for rect in self.body)
         assert len(sizes) == 1
         self.size = first(sizes)
@@ -180,6 +182,11 @@ def is_bordering(side, r1, r2):
         )
     )
 
+def how_bordering(r1, r2):
+    for side in SIDES:
+        if is_bordering(side, r1, r2):
+            return side
+
 def is_bordering_any(r1, r2):
     return any(side for side in SIDES if is_bordering(side, r1, r2))
 
@@ -215,49 +222,88 @@ def chunk(pred, iterable):
 
     return runs
 
+def nwise(iterable, n=2, fill=None):
+    "Take from iterable in `n`-wise tuples."
+    iterables = it.tee(iterable, n)
+    # advance iterables
+    for offset, iterable in enumerate(iterables):
+        # advance with for-loop to avoid catching StopIteration manually.
+        for _ in zip(range(offset), iterable):
+            pass
+    return it.zip_longest(*iterables, fillvalue=fill)
+
 def get_sideline(rect, sidename):
-    f = partial(getattr, rect)
     attrs = SIDELINES_CW[sidename]
-    return tuple(map(f, attrs))
+    return tuple(map(partial(getattr, rect), attrs))
 
 def get_sidelines(rect):
     f = partial(get_sideline, rect)
     return tuple(map(f, SIDELINES_CW))
 
-def draw_snake(
-    snake_body,
-    window,
-    color = 'red',
-    width = 6,
-):
+def outline_rects(rects):
     """
-    Construct the lines from the centers of the rects, one to the next. Gather
-    lines from all sides of all rects. Remove rect sides lines that intersect
-    with any center lines. Draw the remaining lines.
+    Yield lines that outline the rects.
     """
-    def predicate(run, rect):
+    def by_touching_previous(run, rect):
         # rect borders (exactly touches a side) with the last rect.
         return is_bordering_any(run[-1], rect)
 
-    chunked_rects = chunk(predicate, snake_body)
-    for rects in chunked_rects:
-        rect_pairs = zip(rects, rects[1:])
-        center_lines = [(r1.center, r2.center) for r1, r2 in rect_pairs]
-        sides_lines = [line for rect in rects for line in get_sidelines(rect)]
+    for chunked_rects in chunk(by_touching_previous, rects):
+        triples = nwise([None] + chunked_rects, 3)
+        for triplet in triples:
+            first, second, third = triplet
+            if second is None and third is None:
+                # avoid adding (head, None, None)
+                break
 
-        def intersects_any_center(line):
-            intersects_center_line = partial(intersects, line)
-            return any(map(intersects_center_line, center_lines))
+            center_lines = [
+                (r1.center, r2.center) for r1, r2 in nwise(triplet)
+                if r1 and r2
+            ]
 
-        outline_lines = [line for line in sides_lines if not intersects_any_center(line)]
-        for line in outline_lines:
-            p1, p2 = line
-            pygame.draw.line(window, color, p1, p2, width)
+            sides_rect = second or first
+            outline = [
+                line
+                for rect in triplet
+                for line in get_sidelines(sides_rect)
+                if not any(intersects(line, cline) for cline in center_lines)
+            ]
+
+            yield (sides_rect, outline)
+
+def draw_snake(
+    snake_body,
+    window,
+    color = ('aquamarine', 'darkorchid'),
+    background = ('honeydew', 'brown1'),
+    width = 'auto',
+):
+    if width == 'auto':
+        width = min(first(snake_body).size) // 4
+
+    color1, color2 = map(pygame.Color, color)
+    background1, background2 = map(pygame.Color, background)
+
+    items = list(outline_rects(snake_body))
+    for index, (rect, outline) in enumerate(items):
+        percent = index / len(items)
+        pygame.draw.rect(window, background1.lerp(background2, percent), rect)
+        for p1, p2 in outline:
+            pygame.draw.line(window, color1.lerp(color2, percent), p1, p2, width)
+
+def validate_move(current, want):
+    is_x, is_y = current
+    want_x, want_y = want
+    return (
+        (want_x and (want_x + is_x) != 0)
+        or
+        (want_y and (want_y + is_y) != 0)
+    )
 
 def first(iterable, pred=None, default=None):
     return next(filter(pred, iterable), default)
 
-def render_lines(lines, font, surface, color, alignattrs, lastrect):
+def render_text_lines(lines, font, surface, color, alignattrs, lastrect):
     """
     Render lines of text onto a surface with alignment from the last rect to
     the next.
@@ -272,6 +318,29 @@ def render_lines(lines, font, surface, color, alignattrs, lastrect):
 def post_repaint():
     pygame.event.post(pygame.event.Event(REPAINT))
 
+def post_eatfood():
+    pygame.event.post(pygame.event.Event(EATFOOD))
+
+def render_arrow(size, color):
+    arrow_up = pygame.Surface(size, flags=pygame.SRCALPHA)
+    rect = arrow_up.get_rect()
+    rect2 = rect.inflate(-rect.width // 2, 0)
+    rect2.height //= 3
+    pygame.draw.polygon(
+        arrow_up,
+        color,
+        [
+            rect.midtop,
+            rect2.bottomright,
+            rect2.bottomleft
+        ]
+    )
+    rect3 = rect2.inflate(-rect.width // 3, 0)
+    rect3.height = rect.bottom - rect2.bottom
+    rect3.top = rect2.bottom
+    pygame.draw.rect(arrow_up, color, rect3)
+    return arrow_up
+
 def run(
     snake,
     output_string = None,
@@ -285,7 +354,7 @@ def run(
     :param move_ms: Move snake every milliseconds. Default: 250.
     """
     if move_ms is None:
-        move_ms = 250
+        move_ms = 100
 
     clock = pygame.time.Clock()
     window = pygame.display.get_surface()
@@ -293,6 +362,33 @@ def run(
     gui_font = pygame.font.SysFont('monospace', int(min(frame.size)*.04))
     gui_frame = frame.inflate(*(-min(frame.size)*.1,)*2)
     background = window.copy()
+
+    arrow_up = render_arrow(snake.size, 'ghostwhite')
+    arrow_right = pygame.transform.rotate(arrow_up, -90)
+    arrow_down = pygame.transform.rotate(arrow_right, -90)
+    arrow_left = pygame.transform.rotate(arrow_down, -90)
+
+    arrow_from_key = {
+        pygame.K_UP: arrow_up,
+        pygame.K_RIGHT: arrow_right,
+        pygame.K_DOWN: arrow_down,
+        pygame.K_LEFT: arrow_left,
+    }
+
+    # help text near middle-top
+    render_text_lines(
+        [
+            'Outline Snake',
+            'Hold space to animate',
+            'D: toggles debug',
+            'Escape: exit',
+        ],
+        gui_font,
+        background,
+        'ghostwhite',
+        ('midtop', 'midbottom'), # align rect midtop to last rect's midbottom
+        gui_frame.move(0, -gui_frame.height),
+    )
 
     food = None
 
@@ -315,98 +411,102 @@ def run(
             else:
                 return
 
-    # help text near middle-top
-    render_lines(
-        [
-            'Outline Snake',
-            'Hold space to animate',
-            'D: toggles debug',
-            'Escape: exit',
-        ],
-        gui_font,
-        background,
-        'ghostwhite',
-        ('midtop', 'midbottom'), # align rect midtop to last rect's midbottom
-        gui_frame.move(0, -gui_frame.height),
-    )
+    def draw():
+        nonlocal frame_number
+        window.blit(background, (0,)*2)
 
-    move_ms = move_ms or 250
-    pygame.time.set_timer(MOVESNAKE, move_ms)
-    pygame.time.set_timer(GENERATEFOOD, move_ms * 2)
+        # snake
+        draw_snake(snake.body, window)
+        # food
+        if food:
+            pygame.draw.rect(window, 'green', food, 0)
+        if show_debug:
+            # FPS
+            text_image = gui_font.render(f'{clock.get_fps():.2f}', True, 'ghostwhite')
+            window.blit(text_image, text_image.get_rect(topright = frame.topright))
+        #
+        if False:
+            width = snake.size[0]
+            image = pygame.Surface((width*len(want_keys), snake.size[1]))
+            positions = range(0, len(want_keys)*width, width)
+            for x, key in zip(positions, want_keys):
+                arrow_image = arrow_from_key[key]
+                image.blit(arrow_image, (x, 0))
+            window.blit(image, image.get_rect(midright=gui_frame.midright))
 
-    move_buffer = deque([MOVE_RIGHT], maxlen=15)
+        pygame.display.flip()
+        if output_string:
+            # save frame to output
+            path = output_string.format(frame_number)
+            pygame.image.save(window, path)
+            frame_number += 1
+
+    def handle(event):
+        nonlocal show_debug
+        nonlocal food
+        if event.type == pygame.VIDEOEXPOSE:
+            post_repaint()
+        elif event.type == pygame.KEYUP:
+            if event.key == pygame.K_SPACE:
+                # stop animating
+                pygame.time.set_timer(MOVESNAKE, 0)
+                pygame.time.set_timer(GENERATEFOOD, 0)
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                # quit
+                pygame.event.post(pygame.event.Event(pygame.QUIT))
+            elif event.key == pygame.K_d:
+                # toggle debug
+                show_debug = not show_debug
+            elif event.key == pygame.K_SPACE:
+                # begin animating
+                pygame.time.set_timer(MOVESNAKE, move_ms)
+            elif event.key in MOVEKEYS:
+                # buffer input
+                want_keys.append(event.key)
+        elif (event.type == REPAINT):
+            # repaint screen
+            draw()
+        elif (event.type == GENERATEFOOD):
+            # new food
+            generate_food()
+            post_repaint()
+            pygame.time.set_timer(GENERATEFOOD, 0)
+        elif (event.type == MOVESNAKE):
+            # move snake
+            want_key = want_keys[-1]
+            move = snake.velocity
+            want = MOVE_VELOCITY[want_key]
+            if validate_move(move, want):
+                move = want
+            snake.slither(move, wrap=frame)
+            if food and snake.head.colliderect(food):
+                # feed snake
+                post_eatfood()
+            post_repaint()
+        elif (event.type == EATFOOD):
+            # eat food
+            food = None
+            for _ in range(20):
+                snake.body.insert(0, snake.tail.copy())
+            pygame.time.set_timer(GENERATEFOOD, move_ms * 4)
+            post_repaint()
+
     frame_number = 0
     show_debug = False
+    want_keys = deque([pygame.K_RIGHT], maxlen=1)
 
-    post_repaint()
+    pygame.time.set_timer(GENERATEFOOD, move_ms * 4)
     running = True
     while running:
         clock.tick(60)
         is_pressed = pygame.key.get_pressed()
-        is_animating = is_pressed[pygame.K_SPACE]
         # events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    pygame.event.post(pygame.event.Event(pygame.QUIT))
-                elif event.key == pygame.K_d:
-                    show_debug = not show_debug
-                elif (
-                    event.key in MOVEKEYS
-                    and is_animating
-                ):
-                    move_buffer.append(event.key)
-            elif (event.type == REPAINT):
-                # draw
-                window.blit(background, (0,)*2)
-                # draw - snake body
-                for rect in snake.body:
-                    pygame.draw.rect(window, 'ghostwhite', rect)
-                # draw - snake outline
-                draw_snake(snake.body, window)
-                # draw - food
-                if food:
-                    pygame.draw.rect(window, 'green', food, 0)
-                if show_debug:
-                    # draw - FPS
-                    text_image = gui_font.render(f'{clock.get_fps():.2f}', True, 'ghostwhite')
-                    window.blit(text_image, text_image.get_rect(topright = frame.topright))
-                #
-                pygame.display.flip()
-                if is_animating and output_string:
-                    path = output_string.format(frame_number)
-                    pygame.image.save(window, path)
-                    frame_number += 1
-            if is_animating:
-                if (event.type == GENERATEFOOD and food is None):
-                    # new food
-                    generate_food()
-                    post_repaint()
-                elif (event.type == MOVESNAKE):
-                    # move snake
-                    is_x, is_y = snake.velocity
-                    want_move_key = move_buffer[-1]
-                    want_x, want_y = MOVE_VELOCITY[want_move_key]
-                    if (
-                        (want_x and (want_x + is_x) != 0)
-                        or
-                        (want_y and (want_y + is_y) != 0)
-                    ):
-                        move = (want_x, want_y)
-                    else:
-                        move = (is_x, is_y)
-                    snake.slither(move, wrap=frame)
-                    post_repaint()
-                    if food and snake.head.colliderect(food):
-                        pygame.event.post(pygame.event.Event(EATFOOD))
-                        break
-                elif (event.type == EATFOOD):
-                    # eat food
-                    snake.body.insert(0, snake.tail.copy())
-                    food = None
-                    post_repaint()
+            else:
+                handle(event)
 
 def sizetype(string):
     """
