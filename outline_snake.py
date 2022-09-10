@@ -345,6 +345,7 @@ def run(
     snake,
     output_string = None,
     move_ms = None,
+    segments_per_food = None,
 ):
     """
     :param output_string:
@@ -355,6 +356,9 @@ def run(
     """
     if move_ms is None:
         move_ms = 100
+
+    if segments_per_food is None:
+        segments_per_food = 1
 
     clock = pygame.time.Clock()
     window = pygame.display.get_surface()
@@ -487,7 +491,7 @@ def run(
         elif (event.type == EATFOOD):
             # eat food
             food = None
-            for _ in range(20):
+            for _ in range(segments_per_food):
                 snake.body.insert(0, snake.tail.copy())
             pygame.time.set_timer(GENERATEFOOD, move_ms * 4)
             post_repaint()
@@ -534,6 +538,7 @@ def start(options):
         snake,
         output_string = options.output,
         move_ms = options.movems,
+        segments_per_food = options.food,
     )
 
 def cli():
@@ -567,6 +572,11 @@ def cli():
         type = int,
         default = 10,
         help = 'Length of snake. Default: %(default)s',
+    )
+    parser.add_argument(
+        '--food',
+        type = int,
+        help = 'Segments to add per food ate. Default: %(default)s',
     )
     args = parser.parse_args()
     start(args)
