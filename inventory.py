@@ -59,7 +59,7 @@ class TestModOffset(unittest.TestCase):
 
 def modo(a, b, c):
     """
-    Returns a modulo'd offset between d and n.
+    Returns a modulo b shifted for offset c.
     """
     return c + ((a - c) % (b - c))
 
