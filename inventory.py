@@ -212,9 +212,13 @@ def move_cursor(cursor, delta, items, grid_rect):
     move_as_one(rects, x=x, y=y)
 
 def rotate_rects(rects):
-    # TODO:
-    # - this seems terribly messy
-    # - rotate cursor too
+    """
+    Rotate rects 90 degrees.
+
+    Rects are grouped into rows by their y attribute, in a nested list.
+    Transpose the list and use its order to reflow the rects' positions from
+    topleft.
+    """
     x_pos = attrgetter('x')
     y_pos = attrgetter('y')
     grouped = it.groupby(sorted(rects, key=y_pos), key=y_pos)
