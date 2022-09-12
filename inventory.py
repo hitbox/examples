@@ -3,6 +3,7 @@ import contextlib
 import itertools as it
 import math
 import os
+import textwrap
 import time
 import unittest
 
@@ -29,6 +30,8 @@ MOVEKEY_DELTA = {
 }
 
 SIDES = ['top', 'right', 'bottom', 'left']
+
+OPPOSITE_SIDE = {side: SIDES[i % len(SIDES)] for i, side in enumerate(SIDES, start=2)}
 
 ADJACENT_NAMES = {
     'top': ('left', 'right'),
@@ -86,10 +89,16 @@ def nwise(iterable, n=2, fill=None):
     return it.zip_longest(*iterables, fillvalue=fill)
 
 def get_rect(*args, **kwargs):
+    """
+    :param *args:
+        Optional rect used as base. Otherwise new (0,)*4 rect is created.
+    :param kwargs:
+        Keyword arguments to set on new rect.
+    """
     if not len(args) in (0, 1):
         raise ValueError()
     if len(args) == 1:
-        result = args[0]
+        result = args[0].copy()
     else:
         result = pygame.Rect(0,0,0,0)
     for key, val in kwargs.items():
@@ -97,6 +106,9 @@ def get_rect(*args, **kwargs):
     return result
 
 def wrap(rects):
+    """
+    Wrap iterable of rects in a bounding box.
+    """
     boundaries = zip(*map(get_boundary, rects))
     tops, rights, bottoms, lefts = boundaries
     top = min(tops)
@@ -108,13 +120,15 @@ def wrap(rects):
     return pygame.Rect(left, top, width, height)
 
 def move_as_one(rects, **kwargs):
-    original = wrap(rects)
-    destination = original.copy()
-    for key, value in kwargs.items():
-        setattr(destination, key, value)
+    """
+    Move iterable of rects as if they were one, to destination provided in kwargs.
+    """
+    rects1, rects2 = it.tee(rects)
+    original = wrap(rects1)
+    destination = get_rect(original, **kwargs)
     dx = destination.x - original.x
     dy = destination.y - original.y
-    for rect in rects:
+    for rect in rects2:
         rect.x += dx
         rect.y += dy
 
@@ -130,6 +144,8 @@ def align(rects, attrmap):
             setattr(rect, key, getattr(prevrect, prevkey))
 
 def get_color(name, **kwargs):
+    """
+    """
     # ex.: get_color('red', a=255//2)
     #      for getting 'red' and setting the alpha at the same time
     color = pygame.Color(name)
@@ -154,17 +170,38 @@ def make_grid_rects(rect_size, rows, columns):
     ]
     return rects
 
-def draw_grid(surface, cell_size, rows, cols, color, width=1):
+def draw_grid(surface, cell_size, *colors, line_width=1):
+    if len(colors) != line_width:
+        raise ValueError
     cell_width, cell_height = cell_size
     rect = surface.get_rect()
-    for x in range(0, rect.width, cell_width):
-        p1 = (x, 0)
-        p2 = (x, rect.height)
-        pygame.draw.line(surface, color, p1, p2, width)
-    for y in range(0, rect.height, cell_height):
-        p1 = (0, y)
-        p2 = (rect.width, y)
-        pygame.draw.line(surface, color, p1, p2, width)
+    offset_start = -line_width // 2
+    for x in range(cell_width, rect.width, cell_width):
+        for offset, color in enumerate(colors, start=offset_start):
+            p1 = (x+offset, 0)
+            p2 = (x+offset, rect.height)
+            pygame.draw.line(surface, color, p1, p2, 1)
+    for y in range(cell_height, rect.height, cell_height):
+        for offset, color in enumerate(colors, start=offset_start):
+            p1 = (0, y+offset)
+            p2 = (rect.width, y+offset)
+            pygame.draw.line(surface, color, p1, p2, 1)
+
+def draw_cells(surface, rect, color, width=1):
+    """
+    Draw the grid the way the cells are displayed--next to each other.
+    """
+    frame = surface.get_rect()
+    x, y = rect.topleft
+    while True:
+        while True:
+            pygame.draw.rect(surface, color, rect, width)
+            rect = get_rect(rect, left=rect.right)
+            if not frame.contains(rect):
+                break
+        rect = get_rect(rect, x=x, top=rect.bottom)
+        if not frame.contains(rect):
+            break
 
 def move_cursor(cursor, delta, items, grid_rect):
     """
@@ -256,9 +293,6 @@ def jump_cursor(cursor, delta, items, grid_rect):
 
     BOUNDARY_NAME = DELTAS_NAMES[delta]
     line_attrs = ADJACENT_NAMES[BOUNDARY_NAME]
-    # TODO
-    # - left off here
-    # - need the line projection test thingy like shrinkwrap
 
 def place_item(cell_size, item, items):
     width, height = cell_size
@@ -277,74 +311,116 @@ def run(
     clock = pygame.time.Clock()
     fps = 60
 
-    item_font = pygame.font.SysFont('monospace', 40)
+    item_font = pygame.font.SysFont('monospace', 28)
+    small_font = pygame.font.SysFont('monospace', 20)
 
     window = pygame.display.get_surface()
     frame = window.get_rect()
 
-    background = window.copy()
-
     help_ = SimpleNamespace(
         color = 'ghostwhite',
-        font = pygame.font.SysFont('monospace', 40),
-        frame = frame.inflate((-min(frame.size)//32, ) * 2)
+        font = pygame.font.SysFont('monospace', 32),
+        frame = frame.inflate((-min(frame.size)//32, ) * 2),
+        string = textwrap.dedent('''
+            Arrow keys to move
+            Return or Space to grab and drop
+            Tab to rotate'''),
     )
     help_.images = [
-        help_.font.render('Arrow keys to move', True, help_.color),
-        help_.font.render('Return or Space to grab', True, help_.color),
-        help_.font.render('Tab to rotate', True, help_.color),
+        help_.font.render(line, True, help_.color)
+        for line in help_.string.splitlines()
+        if line
     ]
     help_.rects = [image.get_rect() for image in help_.images]
     help_.rects[0].topright = help_.frame.topright
     align(help_.rects, {'topright':'bottomright'})
 
+    background = window.copy()
     for image, rect in zip(help_.images, help_.rects):
         background.blit(image, rect)
 
     grid = SimpleNamespace(
         rows = 7,
         cols = 11,
-        cell_size = (50,)*2,
+        cell_size = (60,)*2,
     )
-    real_size = (grid.cols * grid.cell_size[0], grid.rows * grid.cell_size[1])
-    image_size = tuple(map(lambda x: x+1, real_size))
-    grid.image = pygame.Surface(image_size, flags = pygame.SRCALPHA)
-    draw_grid(grid.image, grid.cell_size, grid.rows, grid.cols, 'ghostwhite')
+    real_size = (
+        grid.cols * grid.cell_size[0],
+        grid.rows * grid.cell_size[1]
+    )
+    image_size = tuple(map(lambda x: x+0, real_size))
+    grid.image = pygame.Surface(image_size, flags=pygame.SRCALPHA)
+    draw_cells(grid.image, pygame.Rect((0,)*2, grid.cell_size), 'azure4')
     grid.rect = get_rect(size=real_size, center=frame.center)
 
     cursor = SimpleNamespace(
         rect = pygame.Rect(grid.rect.topleft, grid.cell_size),
+        # item the cursor is holding
         holding = None,
+        # inflate cursor rect for display only
         inflation = it.cycle(
-            (framesize,)*2 for size in it.chain(range(10), range(10,-1,-1))
-            for framesize in it.repeat(size, 2)
+            (framesize,)*2
+            for size in it.chain(range(-5,6), range(6,-5,-1))
+            for framesize in it.repeat(size, 2) # repeat for two frames
         ),
     )
 
     # make items
     pistol = SimpleNamespace(
-        body = make_grid_rects(grid.cell_size, 2, 3),
+        name = 'Pistol',
         color = 'red',
+        border = 'darkred',
+        rows = 2,
+        cols = 3,
+        font = SimpleNamespace(
+            color = 'red',
+        ),
     )
+    pistol.body = make_grid_rects(grid.cell_size, pistol.rows, pistol.cols)
     move_as_one(pistol.body, topleft=grid.rect.topleft)
+    #pistol.overlay_image = item_font.render(pistol.name, True, 'white')
 
     rifle = SimpleNamespace(
-        body = make_grid_rects(grid.cell_size, 1, 9),
+        name = 'Rifle',
         color = 'burlywood4',
+        border = 'burlywood',
+        rows = 1,
+        cols = 9,
+        font = SimpleNamespace(
+            color = 'burlywood4',
+        ),
     )
+    rifle.body = make_grid_rects(grid.cell_size, rifle.rows, rifle.cols)
     move_as_one(rifle.body, top=pistol.body[-1].bottom, left=grid.rect.left)
+    #rifle.overlay_image = item_font.render(rifle.name, True, 'cornsilk')
 
     grenade = SimpleNamespace(
-        body = make_grid_rects(grid.cell_size, 2, 1),
+        name = 'Grenade',
         color = 'darkgreen',
+        border = 'green',
+        rows = 2,
+        cols = 1,
+        font = SimpleNamespace(
+            color = 'darkgreen',
+        ),
     )
+    grenade.body = make_grid_rects(grid.cell_size, grenade.rows, grenade.cols)
     move_as_one(grenade.body, top=rifle.body[-1].bottom, left=grid.rect.left)
+    #grenade.overlay_image = item_font.render(grenade.name, True, 'lightgreen')
 
     chicken_egg = SimpleNamespace(
-        body = make_grid_rects(grid.cell_size, 1, 1),
+        name = 'Egg',
         color = 'oldlace',
+        border = 'ghostwhite',
+        rows = 1,
+        cols = 1,
+        font = SimpleNamespace(
+            color = 'oldlace',
+        ),
     )
+    chicken_egg.body = make_grid_rects(grid.cell_size, chicken_egg.rows, chicken_egg.cols)
     move_as_one(chicken_egg.body, top=grenade.body[-1].bottom, left=grid.rect.left)
+    #chicken_egg.overlay_image = item_font.render(chicken_egg.name, True, 'mediumorchid4')
 
     items = [
         pistol,
@@ -357,27 +433,31 @@ def run(
     frame_num = 0
     running = True
     while running:
-        if frame_queue:
+        # tick and frame saving
+        if output_string and frame_queue:
             while frame_queue and clock.get_fps() > fps:
                 frame_image = frame_queue.popleft()
                 path = output_string.format(frame_num)
                 pygame.image.save(frame_image, path)
                 frame_num += 1
         elapsed = clock.tick(fps)
-
         # events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                # stop main loop after this frame
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_q, ):
+                    # quit
                     pygame.event.post(pygame.event.Event(pygame.QUIT))
                 elif event.key in MOVEKEY_DELTA:
                     # key to move event
                     post_movecursor(MOVEKEY_DELTA[event.key])
                 elif event.key == pygame.K_TAB:
+                    # rotate item cursor is holding
                     post_rotate_holding()
                 elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                    # grab/drop item
                     if cursor.holding:
                         post_drop()
                     else:
@@ -394,35 +474,41 @@ def run(
                 # drop item
                 cursor.holding = None
             elif event.type == ROTATE_HOLDING:
+                # rotate
                 if cursor.holding:
                     rotate_holding(cursor, grid.rect)
         # draw
         window.blit(background, (0,)*2)
         window.blit(grid.image, grid.rect)
         # draw - items
-        for item in items:
+        def item_draw_sort(item):
+            return cursor.holding is item
+
+        last = None
+        for item in sorted(items, key=item_draw_sort):
+            image = small_font.render(item.name, True, 'magenta')
+            rect = image.get_rect(topleft=last.bottomleft if last else help_.frame.topleft)
+            last = window.blit(image, rect)
             for rect in item.body:
                 pygame.draw.rect(window, item.color, rect)
+                pygame.draw.rect(window, item.border, rect, 1)
+            if hasattr(item, 'overlay_image'):
+                wrapped = wrap(item.body)
+                window.blit(item.overlay_image, item.overlay_image.get_rect(center=wrapped.center))
         # draw - cursor
+        hovering_item = cursor_collideitem(cursor, items)
         if not cursor.holding:
-            item = cursor_collideitem(cursor, items)
-            if item:
-                cursor_rect = wrap(item.body)
+            if hovering_item:
+                cursor_rect = wrap(hovering_item.body)
             else:
                 cursor_rect = cursor.rect
             inflatesize = next(cursor.inflation)
             cursor_rect = cursor_rect.inflate(*inflatesize)
             pygame.draw.rect(window, 'yellow', cursor_rect, 1)
-        if False:
-            # draw - fps
-            image = help_.font.render(f'{clock.get_fps():.2f}', True, 'ghostwhite')
-            last = window.blit(image, image.get_rect(bottomright=help_.frame.bottomright))
-            # draw - len(frame_queue)
-            image = help_.font.render(f'{len(frame_queue)=:03d}', True, 'ghostwhite')
-            last = window.blit(image, image.get_rect(bottomright=last.topright))
-            # draw - frame_num
-            image = help_.font.render(f'{frame_num}', True, 'ghostwhite')
-            last = window.blit(image, image.get_rect(bottomright=last.topright))
+        # draw - hovering/holding item name
+        if hovering_item:
+            image = help_.font.render(hovering_item.name, True, hovering_item.font.color)
+            window.blit(image, image.get_rect(bottomleft=help_.frame.bottomleft))
         #
         pygame.display.flip()
         if output_string:
@@ -430,6 +516,7 @@ def run(
 
 def start(options):
     pygame.font.init()
+    pygame.display.set_caption('pygame - inventory')
     window = pygame.display.set_mode(options.size)
     frame = window.get_rect()
     run(output_string=options.output)
