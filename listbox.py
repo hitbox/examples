@@ -1,12 +1,38 @@
 import argparse
 import contextlib
+import itertools as it
+import operator
 import os
 
 from collections import deque
+from functools import partial
 from types import SimpleNamespace
 
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     import pygame
+
+class pressed_move:
+    """
+    Return tuple of scaled values from pressed keys.
+    """
+
+    def __init__(self, yneg, xpos, ypos, xneg):
+        # arguments in clockwise order
+        self.posneg_x = operator.itemgetter(xpos, xneg)
+        self.posneg_y = operator.itemgetter(ypos, yneg)
+        self.starmul = partial(it.starmap, operator.mul)
+
+    def __call__(self, is_pressed, speed):
+        speed_dir = [speed, -speed]
+        # leaving a note because this is quick obscure
+        # vel = sum(it.starmap(operator.mul, zip(arrow_rightleft(is_pressed),speed_dir)))
+        vx = sum(self.starmul(zip(self.posneg_x(is_pressed),speed_dir)))
+        vy = sum(self.starmul(zip(self.posneg_y(is_pressed),speed_dir)))
+        return (vx, vy)
+
+
+arrow_move = pressed_move(pygame.K_UP, pygame.K_RIGHT, pygame.K_DOWN, pygame.K_LEFT)
+wasd_move = pressed_move(pygame.K_w, pygame.K_d, pygame.K_s, pygame.K_a)
 
 class Window:
 
@@ -88,8 +114,17 @@ def run(
         simple_sprite(pygame.Rect(100,300,40,40), 'green'),
     ]
 
-    handlers = {
-    }
+    handlers = {}
+
+    # should be in positive, negative order
+    arrow_rightleft = operator.itemgetter(pygame.K_RIGHT, pygame.K_LEFT)
+    arrow_downup = operator.itemgetter(pygame.K_DOWN, pygame.K_UP)
+
+    wasd_rightleft = operator.itemgetter(pygame.K_d, pygame.K_a)
+    wasd_downup = operator.itemgetter(pygame.K_s, pygame.K_w)
+
+    speed = 4
+    speed_dir = [speed, -speed]
 
     frame_num = 0
     frame_queue = deque()
@@ -112,27 +147,23 @@ def run(
                 handlers[event.type](event)
         # update
         is_pressed = pygame.key.get_pressed()
-        speed = 4
 
         if is_pressed[pygame.K_LSHIFT]:
-            windows[-1].camera.x += is_pressed[pygame.K_RIGHT] * speed
-            windows[-1].camera.y += is_pressed[pygame.K_DOWN] * speed
-            windows[-1].camera.x += is_pressed[pygame.K_LEFT] * -speed
-            windows[-1].camera.y += is_pressed[pygame.K_UP] * -speed
+            target = windows[-1].camera
         else:
-            sprites[-1].rect.x += is_pressed[pygame.K_RIGHT] * speed
-            sprites[-1].rect.x += is_pressed[pygame.K_LEFT] * -speed
-            sprites[-1].rect.y += is_pressed[pygame.K_UP] * -speed
-            sprites[-1].rect.y += is_pressed[pygame.K_DOWN] * speed
+            target = sprites[-1].rect
 
-        windows[-1].frame.x += is_pressed[pygame.K_d] * speed
-        windows[-1].frame.y += is_pressed[pygame.K_s] * speed
-        windows[-1].frame.x += is_pressed[pygame.K_a] * -speed
-        windows[-1].frame.y += is_pressed[pygame.K_w] * -speed
+        vx, vy = arrow_move(is_pressed, speed)
+        target.x += vx
+        target.y += vy
+
+        vx, vy = wasd_move(is_pressed, speed)
+        windows[-1].frame.x += vx
+        windows[-1].frame.y += vy
 
         # draw
         screen.blit(background, (0,)*2)
-        # draw windows contents
+        # draw - windows contents
         for window in windows:
             surface = window.render(sprites)
             screen.blit(surface, window.frame)
