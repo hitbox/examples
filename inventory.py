@@ -4,6 +4,8 @@ import itertools as it
 import os
 import unittest
 
+from abc import ABC
+from abc import abstractmethod
 from collections import defaultdict
 from collections import deque
 from functools import partial
@@ -16,10 +18,19 @@ with contextlib.redirect_stdout(open(os.devnull, 'w')):
     import pygame
 
 # custom events
+STATESWITCH = pygame.event.custom_type()
 MOVECURSOR = pygame.event.custom_type()
 GRAB = pygame.event.custom_type()
 DROP = pygame.event.custom_type()
 ROTATE_HOLDING = pygame.event.custom_type()
+
+CUSTOMTYPENAMES = {
+    STATESWITCH: 'STATESWITCH',
+    MOVECURSOR: 'MOVECURSOR',
+    GRAB: 'GRAB',
+    DROP: 'DROP',
+    ROTATE_HOLDING: 'ROTATE_HOLDING',
+}
 
 # pygame key id to two-tuple normalized direction vector
 MOVEKEY_DELTA = {
@@ -127,9 +138,7 @@ class TestRemap(unittest.TestCase):
 
 
 class Cursor:
-    """
-    Cursor selector on grid.
-    """
+    "Cursor selector on grid."
 
     def __init__(self, rect, holding=None, hovering=None):
         self.rect = rect
@@ -169,6 +178,7 @@ class CursorRenderer:
         self.items = items
 
     def __call__(self, surf, cursor):
+        # nothing to draw if holding an item
         if cursor.holding:
             return
         # not holding
@@ -196,14 +206,14 @@ class InventoryItemRenderer:
             shadow_color = get_color('green', a=255//2)
         self.shadow_color = shadow_color
 
-    def __call__(self, surf, grid, cursor):
+    def __call__(self, surf, grid, cursor, items):
         """
         Render all inventory items onto grid.
         """
         def draw_body(item, body_rect):
             surf.blit(render_rect(body_rect, item.border, item.color), body_rect)
 
-        for item in grid.items:
+        for item in items:
             if item is cursor.holding:
                 continue
             draw_body(item, wrap(item.body))
@@ -239,27 +249,413 @@ class Grid:
         )
 
 
-class EventHandlers:
+class Inventory:
+
+    def __init__(self, grid):
+        self.grid = grid
+        # items
+        # make and move grid cells; and sort for placement later
+        self.items = sorted(devel_items(self.grid.cell_size), key=item_body_area)
+        # cursor
+        self.cursor = Cursor(rect=get_rect(size=self.grid.cell_size))
+        self.cursor.color = pygame.Color('yellow')
+        self.cursor.fill_color = pygame.Color('yellow')
+        self.cursor.renderer = CursorRenderer(self.items)
+
+    def move_cursor(self, delta):
+        """
+        Move inventory cursor. Moves wrap around grid_rect. Moves take whatever
+        cursor is holding with it. Cursor warps through items.
+        """
+        # TODO
+        # - moving left, jump across object that causes wrap, makes cursor appear
+        #   to move right instead
+        dx, dy = delta
+        if self.cursor.holding:
+            # Move as if from the topleft of the holding item's body rects. The
+            # cursor could be anywhere inside the thing it's holding.
+            x, y = self.cursor.holding.body[0].topleft
+        else:
+            x, y = self.cursor.rect.topleft
+        x += dx * self.cursor.rect.width
+        y += dy * self.cursor.rect.height
+
+        # fixup x, y as we go along
+        if not self.cursor.holding:
+            if self.cursor.hovering:
+                # warping through items when not holding something
+                item_rect = wrap(self.cursor.hovering.body)
+                if dx < 0:
+                    x = item_rect.left - self.cursor.rect.width
+                elif dx > 0:
+                    x = item_rect.right
+                if dy < 0:
+                    y = item_rect.top - self.cursor.rect.height
+                elif dy > 0:
+                    y = item_rect.bottom
+                # TODO
+                # - do a clamp on (x,y) here to prevent wrapping when jumping
+                #   through item
+
+        # gather up rects to move and adjust the right+bottom values for wrapping
+        # this is necessary because the wrapping occurs against the topleft
+        right, bottom = self.grid.rect.bottomright
+        rects = [self.cursor.rect]
+        if self.cursor.holding:
+            # wrap for dimensions of item, not cursor
+            width, height = wrap(self.cursor.holding.body).size
+            right -= width - self.cursor.rect.width
+            bottom -= height - self.cursor.rect.height
+            # add what cursor is holding to list
+            rects.extend(self.cursor.holding.body)
+
+        x = modo(x, right, self.grid.rect.left)
+        y = modo(y, bottom, self.grid.rect.top)
+        move_as_one(rects, x=x, y=y)
+        self.cursor.update_hovering(self.items)
+
+
+class Frames:
+    """
+    Queue of images to save.
+    """
 
     def __init__(self):
-        self.handlers = defaultdict(list)
+        self.number = 0
+        self.queue = deque()
 
-    def __call__(self, event_type):
-        def decorator(func):
-            self.handlers[event_type].append(func)
-            return func
-        return decorator
+    def save(self, output_string):
+        image = self.queue.popleft()
+        path = output_string.format(self.number)
+        pygame.image.save(image, path)
+        self.number += 1
 
-    def for_event(self, event):
-        return self.handlers[event.type]
+    def append(self, image):
+        self.queue.append(image)
 
 
-eventhandler = EventHandlers()
+class TrashEngine:
+
+    def tick(self):
+        # save frames until exhausted or fps is achieved
+        # TODO
+        # [ ] how to get elapsed time with this loop?
+        while frames.queue and settings.clock.get_fps() > settings.fps:
+            frames.save(settings.output_string)
+        settings.clock.tick(settings.fps)
+
+    def draw(self):
+        # update
+        # draw
+        # draw - item name
+        # draw - finish
+        pygame.display.flip()
+        if settings.output_string:
+            frames.append(settings.window.copy())
+
+
+class StateBase(ABC):
+
+    @abstractmethod
+    def start(self):
+        pass
+
+    @abstractmethod
+    def events(self):
+        pass
+
+    @abstractmethod
+    def update(self):
+        pass
+
+    @abstractmethod
+    def draw(self):
+        pass
+
+
+class EventDispatchMixin:
+
+    def events(self):
+        for event in pygame.event.get():
+            name = callable_name_for_event(event)
+            method = getattr(self, name, None)
+            if method:
+                method(event)
+
+
+class IntroState(StateBase):
+
+    def __init__(self):
+        self.screen = pygame.display.get_surface()
+        self.frame = self.screen.get_rect()
+        self.font = pygame.font.SysFont('arial', 20)
+        self.clock = pygame.time.Clock()
+        self.fps = 60
+
+    def start(self):
+        self.timeout = 250
+        self.clock.tick()
+
+    def events(self):
+        pygame.event.pump()
+
+    def update(self):
+        self.timeout -= self.clock.tick(self.fps)
+        if self.timeout <= 0:
+            post_stateswitch(InventoryState)
+
+    def draw(self):
+        self.screen.fill('black')
+        image = self.font.render(self.__class__.__name__, True, 'white')
+        self.screen.blit(image, image.get_rect(center=self.frame.center))
+        pygame.display.flip()
+
+
+class OutroState(
+    EventDispatchMixin,
+    StateBase,
+):
+
+    def __init__(self):
+        self.screen = pygame.display.get_surface()
+        self.frame = self.screen.get_rect()
+        self.font = pygame.font.SysFont('arial', 20)
+        self.clock = pygame.time.Clock()
+        self.fps = 60
+
+    def start(self):
+        self.timeout = 250
+        self.clock.tick()
+
+    def on_quit(self, event):
+        post_stateswitch(None)
+
+    def update(self):
+        self.timeout -= self.clock.tick(self.fps)
+        if self.timeout <= 0:
+            post_stateswitch(None)
+
+    def draw(self):
+        self.screen.fill('black')
+        image = self.font.render(self.__class__.__name__, True, 'white')
+        self.screen.blit(image, image.get_rect(center=self.frame.center))
+        pygame.display.flip()
+
+
+class PlayState(
+    EventDispatchMixin,
+    StateBase,
+):
+    "Playing game state"
+
+    def __init__(self):
+        self.screen = pygame.display.get_surface()
+        self.frame = self.screen.get_rect()
+        self.font = pygame.font.SysFont('arial', 20)
+
+    def start(self):
+        pass
+
+    def on_quit(self, event):
+        post_stateswitch(None)
+
+    def on_keydown(self, event):
+        if not event.mod:
+            post_stateswitch(InventoryState)
+
+    def update(self):
+        pass
+
+    def draw(self):
+        self.screen.fill('black')
+        image = self.font.render(self.__class__.__name__, True, 'white')
+        self.screen.blit(image, image.get_rect(center=self.frame.center))
+        pygame.display.flip()
+
+
+class InventoryState(
+    EventDispatchMixin,
+    StateBase,
+):
+    "A simple inventory with movement like Resident Evil 4."
+
+    def __init__(self):
+        """
+        """
+        self.clock = pygame.time.Clock()
+        self.fps = 60
+        self.screen = pygame.display.get_surface()
+        self.screen.fill('black')
+        self.background = self.screen.copy()
+        self.frame = self.screen.get_rect()
+        self.font = pygame.font.SysFont('arial', 20)
+        # help text
+        self.help_ = SimpleNamespace(
+            color = 'ghostwhite',
+            normal_font = pygame.font.SysFont('arial', 32),
+            frame = self.frame.inflate((-min(self.frame.size)//32, ) * 2),
+            lines = [
+                'Arrow keys to move',
+                'Return or Space to grab and drop',
+                'Tab to rotate',
+            ],
+        )
+        # grid
+        grid = Grid(rows=7, cols=11, cell_size=(60,)*2)
+        grid.image = pygame.Surface(grid.image_size, flags=pygame.SRCALPHA)
+        grid.rect = grid.image.get_rect()
+        draw_cells(grid.image, pygame.Rect((0,)*2, grid.cell_size), 'azure4')
+        # inventory
+        self.inventory = Inventory(grid)
+        self.inventory.grid.rect = self.inventory.grid.image.get_rect(center=self.frame.center)
+        self.inventory.cursor.rect.topleft = self.inventory.grid.rect.topleft
+        # initial position items
+        for item in self.inventory.items:
+            move_as_one(item.body, topleft=self.inventory.grid.rect.topleft)
+        # place items on grid
+        items = self.inventory.items[:]
+        while items:
+            item = items.pop()
+            place_item(item, self.inventory.grid, self.inventory.items)
+
+        # render text images and rects
+        self.help_.images = render_lines(self.help_.normal_font, self.help_.color, self.help_.lines)
+        self.help_.rects = [image.get_rect() for image in self.help_.images]
+        # align text rects
+        self.help_.rects[0].topright = self.help_.frame.topright
+        align(self.help_.rects, {'topright': 'bottomright'})
+        # bake background
+        for image, rect in zip(self.help_.images, self.help_.rects):
+            self.background.blit(image, rect)
+        self.background.blit(self.inventory.grid.image, self.inventory.grid.rect)
+        #
+        self.item_renderer = InventoryItemRenderer()
+        #
+        self.animations = [
+            AttributeAnimation(
+                self.inventory.cursor.fill_color,
+                'a', # alpha
+                it.cycle(
+                    int(lerp(255*.25, 255*.50, frametime/10))
+                    for time in it.chain(range(10), range(9, 0, -1))
+                    for frametime in it.repeat(time, 2)
+                )
+            ),
+        ]
+
+    def start(self):
+        pass
+
+    def on_quit(self, event):
+        "PlayState after inventory quit"
+        post_stateswitch(PlayState)
+
+    def on_keydown(self, event):
+        if event.key in (pygame.K_q, ):
+            # quit
+            post_quit()
+        elif event.key in MOVEKEY_DELTA:
+            # key to move event
+            delta = MOVEKEY_DELTA[event.key]
+            post_movecursor(delta, self.inventory.grid)
+        elif event.key == pygame.K_TAB:
+            # rotate item cursor is holding
+            post_rotate_holding(self.inventory.cursor)
+        elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+            # grab/drop item
+            if self.inventory.cursor.holding:
+                post_event = post_drop
+            else:
+                post_event = post_grab
+            post_event(self.inventory.cursor, self.inventory.items)
+
+    def on_userevent(self, event):
+        "EventDispatchMixin will get us here, and we further resolve."
+        if event.type == MOVECURSOR:
+            self.on_movecursor(event)
+        elif event.type == ROTATE_HOLDING:
+            self.on_rotate(event)
+        elif event.type == GRAB:
+            self.on_grab(event)
+        elif event.type == DROP:
+            self.on_drop(event)
+
+    def on_movecursor(self, event):
+        "Move Cursor"
+        self.inventory.move_cursor(event.delta)
+
+    def on_rotate(self, event):
+        """
+        Rotate item current held by cursor.
+        """
+        if self.inventory.cursor.holding:
+            rotate_holding(self.inventory.cursor, self.inventory.grid.rect)
+
+    def on_grab(self, event):
+        "Grab Item"
+        item = cursor_collideitem(self.inventory.cursor, self.inventory.items)
+        if item:
+            self.inventory.cursor.holding = item
+
+    def on_drop(self, event):
+        "Drop Item"
+        was_holding = self.inventory.cursor.holding
+        items = cursor_collideitem_all(
+            self.inventory.cursor,
+            self.inventory.items
+        )
+        other_colliding = [item for item in items if item is not was_holding]
+        if len(other_colliding) == 1:
+            # item dropped onto another, pick the other up
+            self.inventory.cursor.holding = other_colliding[0]
+            self.inventory.cursor.rect.clamp_ip(wrap(other_colliding[0].body))
+        elif len(other_colliding) == 0:
+            # item dropped into empty space
+            self.inventory.cursor.holding = None
+
+    def update(self):
+        "Update Inventory"
+        self.clock.tick(self.fps)
+        for animation in self.animations:
+            animation()
+
+    def draw(self):
+        "Draw Inventory"
+        self.screen.blit(self.background, (0,)*2)
+        # items
+        self.item_renderer(
+            self.screen,
+            self.inventory.grid,
+            self.inventory.cursor,
+            self.inventory.items
+        )
+        # cursor
+        self.inventory.cursor.renderer(self.screen, self.inventory.cursor)
+        # item text
+        item = self.inventory.cursor.hovering or self.inventory.cursor.holding
+        if item:
+            image = self.help_.normal_font.render(item.name, True, item.font.color)
+            rect = image.get_rect(bottomleft=self.help_.frame.bottomleft)
+            self.screen.blit(image, rect)
+        pygame.display.flip()
+        # TODO: save frames
+
 
 get_bounds = attrgetter(*SIDES)
 
-def resolveattr(attr, obj, data, fallback):
-    return getattr(obj, attr, data.get(attr, fallback))
+getx = attrgetter('x')
+gety = attrgetter('y')
+
+def callable_name_for_event(event):
+    event_name = pygame.event.event_name(event.type)
+    callable_name = f'on_{event_name.lower()}'
+    return callable_name
+
+def first_or_none(iterable):
+    try:
+        return next(iterable)
+    except StopIteration:
+        pass
 
 def render_lines(font, color, lines, antialias=True):
     """
@@ -340,61 +736,12 @@ def post_rotate_holding(cursor):
     event = pygame.event.Event(ROTATE_HOLDING, cursor=cursor)
     pygame.event.post(event)
 
-@eventhandler(pygame.KEYDOWN)
-def on_keydown(event):
-    if event.key in (pygame.K_q, ):
-        # quit
-        pygame.event.post(pygame.event.Event(pygame.QUIT))
-    elif event.key in MOVEKEY_DELTA:
-        # key to move event
-        delta = MOVEKEY_DELTA[event.key]
-        post_movecursor(delta, event.grid)
-    elif event.key == pygame.K_TAB:
-        # rotate item cursor is holding
-        post_rotate_holding(event.cursor)
-    elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
-        # grab/drop item
-        if event.cursor.holding:
-            post_drop(event.cursor, event.grid.items)
-        else:
-            post_grab(event.cursor, event.grid.items)
+def post_stateswitch(state_class):
+    event = pygame.event.Event(STATESWITCH, state_class=state_class)
+    pygame.event.post(event)
 
-@eventhandler(MOVECURSOR)
-def on_movecursor(event):
-    """
-    Move everything as one to keep cursor relative position
-    """
-    move_cursor(event.cursor, event.delta, event.grid.items, event.grid.rect)
-
-@eventhandler(ROTATE_HOLDING)
-def on_rotate(event):
-    """
-    Rotate item current held by cursor.
-    """
-    if event.cursor.holding:
-        rotate_holding(event.cursor, event.grid.rect)
-
-@eventhandler(GRAB)
-def on_grab(event):
-    item = cursor_collideitem(event.cursor, event.grid.items)
-    if item:
-        event.cursor.holding = item
-
-@eventhandler(DROP)
-def on_drop(event):
-    was_holding = event.cursor.holding
-    other_colliding = [
-        item
-        for item in cursor_collideitem_all(event.cursor, event.grid.items)
-        if item is not was_holding
-    ]
-    if len(other_colliding) == 1:
-        # item dropped onto another, pick the other up
-        event.cursor.holding = other_colliding[0]
-        event.cursor.rect.clamp_ip(wrap(other_colliding[0].body))
-    elif len(other_colliding) == 0:
-        # item dropped into empty space
-        event.cursor.holding = None
+def post_quit():
+    pygame.event.post(pygame.event.Event(pygame.QUIT))
 
 def nwise(iterable, n=2, fill=None):
     "Take from iterable in `n`-wise tuples."
@@ -553,59 +900,6 @@ def draw_cells(surface, rect, color, width=1):
         if not frame.contains(rect):
             break
 
-def move_cursor(cursor, delta, items, grid_rect):
-    """
-    Move inventory cursor. Moves wrap around grid_rect. Moves take whatever
-    cursor is holding with it. Cursor warps through items.
-    """
-    # TODO
-    # - moving left, jump across object that causes wrap, makes cursor appear
-    #   to move right instead
-    dx, dy = delta
-    if cursor.holding:
-        # Move as if from the topleft of the holding item's body rects. The
-        # cursor could be anywhere inside the thing it's holding.
-        x, y = cursor.holding.body[0].topleft
-    else:
-        x, y = cursor.rect.topleft
-    x += dx * cursor.rect.width
-    y += dy * cursor.rect.height
-
-    # fixup x, y as we go along
-    if not cursor.holding:
-        if cursor.hovering:
-            # warping through items when not holding something
-            item_rect = wrap(cursor.hovering.body)
-            if dx < 0:
-                x = item_rect.left - cursor.rect.width
-            elif dx > 0:
-                x = item_rect.right
-            if dy < 0:
-                y = item_rect.top - cursor.rect.height
-            elif dy > 0:
-                y = item_rect.bottom
-            # TODO
-            # - do a clamp on (x,y) here to prevent wrapping when jumping
-            #   through item
-
-    # gather up rects to move and adjust the right+bottom values for wrapping
-    # this is necessary because the wrapping occurs against the topleft
-    right, bottom = grid_rect.bottomright
-    rects = [cursor.rect]
-    if cursor.holding:
-        # wrap for dimensions of item, not cursor
-        width, height = wrap(cursor.holding.body).size
-        right -= width - cursor.rect.width
-        bottom -= height - cursor.rect.height
-        # add what cursor is holding to list
-        rects.extend(cursor.holding.body)
-
-    x = modo(x, right, grid_rect.left)
-    y = modo(y, bottom, grid_rect.top)
-    move_as_one(rects, x=x, y=y)
-
-    cursor.update_hovering(items)
-
 def rotate_rects(rects):
     """
     Rotate rects 90 degrees.
@@ -614,16 +908,14 @@ def rotate_rects(rects):
     Transpose the list and use its order to reflow the rects' positions from
     topleft.
     """
-    x_pos = attrgetter('x')
-    y_pos = attrgetter('y')
-    grouped = it.groupby(sorted(rects, key=y_pos), key=y_pos)
+    grouped = it.groupby(sorted(rects, key=gety), key=gety)
     table = ( list(items) for key, items in grouped )
     #
     rotated_table = zip(*table)
     wrapped = wrap(rects)
     left, top = wrapped.topleft
     for row in rotated_table:
-        row = sorted(row, key=x_pos)
+        row = sorted(row, key=getx)
         row[0].left = left
         for r1, r2 in nwise(row):
             r1.top = top
@@ -648,13 +940,13 @@ def rotate_holding(cursor, grid_rect):
     clamp_many(rects, grid_rect)
     cursor.rect.clamp_ip(wrap(cursor.holding.body))
 
-def place_item(item, grid):
+def place_item(item, grid, items):
     """
     """
     item_wrap = wrap(item.body)
     cells = list(makegrid(grid.cell_size, grid.rows, grid.cols))
     move_as_one(cells, topleft=grid.rect.topleft)
-    filled = [rect for item in grid.items for rect in item.body]
+    filled = [rect for item in items for rect in item.body]
     for cell_rect in cells:
         item_wrap = get_rect(item_wrap, topleft=cell_rect.topleft)
         if not any(item_wrap.colliderect(filled_rect) for filled_rect in filled):
@@ -726,115 +1018,49 @@ def devel_items(cell_size):
     items = [pistol, rifle, grenade, chicken_egg]
     return items
 
-def run(settings):
-    # help text
-    help_ = SimpleNamespace(
-        color = 'ghostwhite',
-        normal_font = pygame.font.SysFont('nope', 32),
-        frame = settings.frame.inflate((-min(settings.frame.size)//32, ) * 2),
-        lines = [
-            'Arrow keys to move',
-            'Return or Space to grab and drop',
-            'Tab to rotate',
-        ],
-    )
-    # render text images and rects
-    help_.images = render_lines(help_.normal_font, help_.color, help_.lines)
-    help_.rects = [image.get_rect() for image in help_.images]
-    # align text rects
-    help_.rects[0].topright = help_.frame.topright
-    align(help_.rects, {'topright': 'bottomright'})
+def trash_run(settings):
+    # bake unchanging images into background
+    frames = Frames()
+    # consume remaining frame queue
+    while frames.queue:
+        frames.save(settings.output_string)
 
-    # grid
-    grid = Grid(rows=7, cols=11, cell_size=(60,)*2)
-    grid.image = pygame.Surface(grid.image_size, flags=pygame.SRCALPHA)
-    draw_cells(grid.image, pygame.Rect((0,)*2, grid.cell_size), 'azure4')
-    grid.rect = grid.image.get_rect(center=settings.frame.center)
-    # make and move grid cells; and sort for placement later
-    grid.items = sorted(devel_items(grid.cell_size), key=item_body_area)
-    for item in grid.items:
-        move_as_one(item.body, topleft=grid.rect.topleft)
-    # place items on grid
-    items = grid.items[:]
-    while items:
-        item = items.pop()
-        place_item(item, grid)
-
-    # back unchanging images into background
-    for image, rect in zip(help_.images, help_.rects):
-        settings.background.blit(image, rect)
-    settings.background.blit(grid.image, grid.rect)
-
-    cursor = Cursor(rect=pygame.Rect(grid.rect.topleft, grid.cell_size))
-    cursor.color = pygame.Color('yellow')
-    cursor.fill_color = pygame.Color('yellow')
-    cursor.renderer = CursorRenderer(grid.items)
-
-    item_renderer = InventoryItemRenderer()
-
-    animations = [
-        AttributeAnimation(
-            cursor.fill_color,
-            'a', # alpha
-            it.cycle(
-                int(lerp(255*.25, 255*.50, frametime/10))
-                for time in it.chain(range(10), range(9, 0, -1))
-                for frametime in it.repeat(time, 2)
-            )
-        ),
-    ]
-
-    frame_queue = deque()
-    frame_num = 0
-
-    def save_frame():
-        """
-        Save a frame from the frame queue.
-        """
-        nonlocal frame_num
-        frame_image = frame_queue.popleft()
-        path = settings.output_string.format(frame_num)
-        pygame.image.save(frame_image, path)
-        frame_num += 1
-
+def run(state_class):
+    "Run state engine"
+    next_state = None
+    state = state_class()
+    state_instances = set([state])
+    state.start()
     running = True
     while running:
-        # tick and frame saving
-        if settings.output_string and frame_queue:
-            # save frames until exhausted or fps is achieved
-            while frame_queue and settings.clock.get_fps() > fps:
-                save_frame()
-        elapsed = settings.clock.tick(settings.fps)
-        # events
+        # events only the engine should see
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                # stop main loop after this frame
-                running = False
+            if event.type != STATESWITCH:
+                pygame.event.post(event)
             else:
-                event.cursor = cursor
-                event.grid = grid
-                for handler in eventhandler.for_event(event):
-                    handler(event)
-        # update
-        for animation in animations:
-            animation()
-        # draw
-        settings.window.blit(settings.background, (0,)*2)
-        item_renderer(settings.window, grid, cursor)
-        cursor.renderer(settings.window, cursor)
-        # draw - item name
-        item = cursor.hovering or cursor.holding
-        if item:
-            image = help_.normal_font.render(item.name, True, item.font.color)
-            settings.window.blit(image, image.get_rect(bottomleft=help_.frame.bottomleft))
-        # draw - finish
-        pygame.display.flip()
-        if settings.output_string:
-            frame_queue.append(settings.window.copy())
-    # consume remaining frame queue
-    if settings.output_string and frame_queue:
-        while frame_queue:
-            save_frame()
+                # STATESWITCH event
+                if event.state_class is None:
+                    running = False
+                else:
+                    # try to get already created instance
+                    next_state = first_or_none(
+                        instantiated
+                        for instantiated in state_instances
+                        if event.state_class
+                        and isinstance(instantiated, event.state_class)
+                    )
+                    if next_state is None:
+                        next_state = event.state_class()
+                        state_instances.add(next_state)
+        if next_state:
+            # change state
+            state = next_state
+            state.start()
+            next_state = None
+        else:
+            state.events()
+            state.update()
+            state.draw()
 
 def start(options):
     """
@@ -852,13 +1078,15 @@ def start(options):
     settings.background = settings.window.copy()
     settings.frame = settings.window.get_rect()
 
-    run(settings)
+    run(IntroState)
 
 def sizetype(string):
     """
     Parse string into a tuple of integers.
     """
-    size = tuple(map(int, string.replace(',', ' ').split()))
+    parts = string.replace(',', ' ').split()
+    size = tuple(map(int, parts))
+    # automatic square, for example: 400, => (400, 400)
     if len(size) == 1:
         size += size
     return size
@@ -896,7 +1124,8 @@ def cli():
     )
     parser.add_argument(
         '--output',
-        help = 'Format string for frame output.',
+        help = 'Format string for frame output.'
+               ' Like path/to/frames/frame{:05d}.png',
     )
     args = parser.parse_args()
     start(args)
