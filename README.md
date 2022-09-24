@@ -17,3 +17,8 @@ Incomplete snake game to demonstrate drawing the outline of the snake by removin
 Inspired by: https://halt.software/dead-simple-layouts/
 
 Using a generic resizing function and a cutting function cut a rect, splitting into two for layout purposes.
+
+## Notes
+
+- Keeping everything single files for now.
+
