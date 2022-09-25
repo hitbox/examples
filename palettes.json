@@ -1,0 +1,17 @@
+{
+    "metadata": {
+        "readme": "Just some of the palettes I liked hand crafted into json.",
+        "source": "https://www.color-hex.com/color-palettes/popular.php"
+    },
+    "palettes": {
+        "bootstrap": ["#d9534f", "#f9f9f9", "#5bc0de", "#5cb85c", "#428bca"],
+        "facebook": ["#3b5998", "#8b9dc3", "#dfe3ee", "#f7f7f7", "#ffffff"],
+        "google": ["#008744", "#0057e7", "#d62d20", "#ffa700", "#ffffff"],
+        "beach": ["#96ceb4", "#ffeead", "#ff6f69", "#ffcc5c", "#88d8b0"],
+        "retro": ["#666547", "#fb2e01", "#6fcb9f", "#ffe28a", "#fffeb3"],
+        "red-orange": ["#ffc100", "#ff9a00", "#ff7400", "#ff4d00", "#ff0000"],
+        "warning": ["#cc3300", "#ff9966", "#ffcc00", "#99cc33", "#339900"],
+        "army camouflage": ["#604439", "#9e9a75", "#1c222e", "#41533b", "#554840"],
+        "luxury": ["#cbbeb5", "#ff6666", "#525266", "#423f3b", "#ffe5a9"]
+    }
+}
