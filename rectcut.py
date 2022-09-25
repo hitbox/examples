@@ -626,7 +626,9 @@ def cli():
     # TODO
     # [X] generic function taking sidename to cut
     # [ ] non-inplace versions? does that make sense? what's the use?
-    # [ ] resize bordering rects like tiling window manager
+    # [X] resize bordering rects like tiling window manager
+    # [ ] limit resizing in tiling mode
+    # [ ] try to keep ratio of rects affected?
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--size',
