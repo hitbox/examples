@@ -201,8 +201,6 @@ class EventDispatchMixin:
                 method(event)
 
 
-global_rects = []
-
 class RectStateBase(EventDispatchMixin, BaseState):
 
     def on_quit(self, event):
@@ -218,7 +216,8 @@ class RectCutState(RectStateBase):
         self.font = pygame.font.SysFont('arial', 32)
         self.screen = pygame.display.get_surface()
         self.frame = self.screen.get_rect()
-        self.rect_renderer = RectRenderer(palettes['beach'])
+        self.rect_renderer = RectRenderer(global_palettes['beach'])
+        #
         self.preview_cut_line = None
         self.cut_sides = it.cycle(SIDES)
         self.next_cut_side()
@@ -226,8 +225,10 @@ class RectCutState(RectStateBase):
 
     def start(self):
         if self.started == 0:
-            global_rects.append(inflate_by(self.frame, -.20))
+            initial_rect = inflate_by(self.frame, -.20)
+            global_rects.append(initial_rect)
         self.started += 1
+        self.update_preview_cut_line(pygame.mouse.get_pos(), global_rects)
 
     def on_keydown(self, event):
         if event.key in (pygame.K_TAB, pygame.K_q):
@@ -241,7 +242,13 @@ class RectCutState(RectStateBase):
         self.update_preview_cut_line(event.pos, global_rects)
 
     def on_mousebuttondown(self, event):
-        self.cut_at_position(event.pos, global_rects)
+        if event.button != pygame.BUTTON_LEFT:
+            return
+        rect = get_colliding_rect(event.pos, global_rects)
+        if not rect:
+            return
+        remaining = cut_at_position(rect, event.pos, self.cut_side)
+        global_rects.append(remaining)
 
     def next_cut_side(self):
         self.cut_side = next(self.cut_sides)
@@ -249,24 +256,10 @@ class RectCutState(RectStateBase):
 
     def update_preview_cut_line(self, pos, rects):
         rect = get_colliding_rect(pos, rects)
-        if rect:
-            x, y = pos
-            if self.cut_side in ('top', 'bottom'):
-                self.preview_cut_line = ((rect.left, y), (rect.right, y))
-            else:
-                self.preview_cut_line = ((x, rect.top), (x, rect.bottom))
-
-    def cut_at_position(self, pos, rects_list):
-        rect = get_colliding_rect(pos, rects_list)
-        if rect:
-            x, y = pos
-            amount = getattr(rect, self.cut_side)
-            if self.cut_side in ('left', 'right'):
-                amount = abs(amount - x)
-            else:
-                amount = abs(amount - y)
-            other = cut_rect_ip(rect, self.cut_side, amount)
-            rects_list.append(other)
+        if not rect:
+            self.preview_cut_line = None
+        else:
+            self.preview_cut_line = make_preview_cut_line(rect, pos, self.cut_side)
 
     def update(self):
         pass
@@ -294,7 +287,8 @@ class TilingManagerState(RectStateBase):
         self.font = pygame.font.SysFont('arial', 32)
         self.screen = pygame.display.get_surface()
         self.frame = self.screen.get_rect()
-        self.rect_renderer = RectRenderer(palettes['beach'])
+        self.rect_renderer = RectRenderer(global_palettes['beach'])
+        #
         self.dragging = None
 
     def start(self):
@@ -330,67 +324,8 @@ class TilingManagerState(RectStateBase):
         pygame.display.flip()
 
 
-class RectCutEventHandler(EventHandler):
-
-    userevent_names = {
-        SWITCHMODE: 'switchmode',
-    }
-
-    def __init__(self, is_demo_mode, rectcutstate, factor):
-        self.is_demo_mode = is_demo_mode
-        self.cutsides = it.cycle(SIDES)
-        self.cut_side = next(cutsides)
-        self.rectcutstate = rectcutstate
-        self.factor = factor
-
-    def on_demo_cutrect(self, event):
-        if len(self.rectcutstate.drawrects) <= self.factor:
-            newrect = cut_rect_ip(
-                self.rectcutstate.drawrects[0],
-                self.cut_side,
-                min(frame.size) // 8
-            )
-            self.rectcutstate.drawrects.append(newrect)
-        else:
-            init_drawrects()
-            self.cut_side = next(cutsides)
-
-    def on_keydown(self, event):
-        if event.key in (pygame.K_LALT, pygame.K_RALT):
-            self.is_demo_mode = not self.is_demo_mode
-            post_switchmode(self.is_demo_mode)
-        elif not self.is_demo_mode and event.key == pygame.K_TAB:
-            self.cut_side = next(cutsides)
-            update_preview(pygame.mouse.get_pos())
-        elif event.key == pygame.K_SPACE:
-            palette_name = next(self.rectcutstate.palette_names)
-            self.rectcutstate.colors = self.rectcutstate.palettes[palette_name]
-
-    def on_mousebuttondown(self, event):
-        rect = get_colliding_rect(event.pos)
-        if rect:
-            x, y = event.pos
-            amount = getattr(rect, self.cut_side)
-            if self.cut_side in ('left', 'right'):
-                amount = abs(amount - x)
-            else:
-                amount = abs(amount - y)
-            other = cut_rect_ip(rect, self.cut_side, amount)
-            self.rectcutstate.drawrects.append(other)
-
-    def on_mousemotion(self, event):
-        update_preview(event.pos)
-
-    def on_switchmode(self, event):
-        if event.is_demo_mode:
-            self.rectcutstate.preview_cut_line = None
-            pygame.time.set_timer(DEMOCUTRECT, 500)
-        else:
-            pygame.time.set_timer(DEMOCUTRECT, 0)
-            handler = interact_handlers
-
-
 class RectRenderer:
+    "Render pygame rects"
 
     def __init__(self, colors, width=4):
         self.colors = colors
@@ -452,12 +387,25 @@ def sorted_groupby(iterable, key=None):
     return it.groupby(sorted(iterable, key=key), key=key)
 
 def grouped_sides(rects):
+    """
+    Group rects by their sides and the value of that side
+    e.g.: ('right', 42) -> [list of rects where rect.right == 42]
+    """
     grouped_by_sides_and_values = {
         (side_name, side_value): list(sharing_rects)
         for side_name, side_getter in zip(SIDES, SIDES_GETTERS)
         for side_value, sharing_rects in sorted_groupby(rects, key=side_getter)
     }
     return grouped_by_sides_and_values
+
+def make_preview_cut_line(rect, pos, cut_side):
+    # assumes pos(ition) colliding rect
+    x, y = pos
+    if cut_side in ('top', 'bottom'):
+        line = ((rect.left, y), (rect.right, y))
+    else:
+        line = ((x, rect.top), (x, rect.bottom))
+    return line
 
 def make_dragging(rects, pos):
     """
@@ -596,6 +544,13 @@ def cut_rect_ip(rect, side, amount):
     resize_side_ip(rect, side, resize_amount)
     return result
 
+def cut_at_position(rect, pos, side):
+    posdict = dict(zip('xy', pos))
+    poskey = SIDEPOS_BY_NAME[side]
+    amount = abs(getattr(rect, side) - posdict[poskey])
+    remaining = cut_rect_ip(rect, side, amount)
+    return remaining
+
 def post_stateswitch(state_class, **data):
     event = pygame.event.Event(STATESWITCH, state_class=state_class, **data)
     pygame.event.post(event)
@@ -603,42 +558,21 @@ def post_stateswitch(state_class, **data):
 def inflate_by(rect, fraction):
     return rect.inflate(rect.width*fraction, rect.height*fraction)
 
-def trash_run(
-    output_string = None,
-    demo_mode = False,
-):
-    frame_num = 0
-    frame_queue = deque()
-
-    def save_frame():
-        nonlocal frame_num
-        frame_image = frame_queue.popleft()
-        path = output_string.format(frame_num)
-        pygame.image.save(frame_image, path)
-        frame_num += 1
-
-    running = True
-    while running:
-        # save frame from queue until fps is met or run out of frames
-        while frame_queue and clock.get_fps() > fps:
-            save_frame()
-        elapsed = clock.tick(fps)
-    # finish frame queue
-    while frame_queue:
-        save_frame()
-
 def get_colliding_rect(position, rects):
     for rect in rects:
         if rect.collidepoint(position):
             return rect
 
-def run(state_class):
+def run(
+    state_class,
+    output_string = None,
+):
     "Run state engine"
     next_state = None
     state = state_class()
     state_instances = set([state])
-    state.start()
     running = True
+    state.start()
     while running:
         # events only the engine should see
         for event in pygame.event.get():
@@ -712,13 +646,16 @@ def cli():
     args = parser.parse_args()
     start(args)
 
-palettes = palettes_from_json('palettes.json')['palettes']
-
+# needed to wait for get_adjacent_corners function
+# sides to two-tuple attribute names, forming line for that side
 # e.g.: 'top' -> ('topleft', 'topright')
-SIDES_ADJACENT_CORNERS = {
-    get_adjacent_corners(side)
-    for side in SIDES
-}
+SIDES_ADJACENT_CORNERS = {side: get_adjacent_corners(side) for side in SIDES}
 
 if __name__ == '__main__':
+    # unsure how to share between states, especially when the engine controls when
+    # they're instantiated.
+    global_palettes = palettes_from_json('palettes.json')['palettes']
+
+    global_rects = []
+
     cli()
