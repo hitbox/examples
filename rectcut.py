@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import itertools as it
 import json
+import math
 import operator
 import os
 import random
@@ -224,6 +225,8 @@ class RectCutState(RectStateBase):
         self.started = 0
 
     def start(self):
+        cursor = pygame.SYSTEM_CURSOR_ARROW
+        pygame.mouse.set_cursor(cursor)
         if self.started == 0:
             initial_rect = inflate_by(self.frame, -.20)
             global_rects.append(initial_rect)
@@ -296,7 +299,7 @@ class TilingManagerState(RectStateBase):
 
     def on_keydown(self, event):
         if event.key in (pygame.K_TAB, pygame.K_q):
-            post_stateswitch(RectCutState)
+            post_stateswitch(RectJoinState)
         elif event.key == pygame.K_ESCAPE:
             post_stateswitch(None)
 
@@ -307,9 +310,15 @@ class TilingManagerState(RectStateBase):
         self.dragging = None
 
     def on_mousemotion(self, event):
+        self.update_mousecursor(event.pos)
         if not self.dragging:
             return
         unpack_tiling_drag(self.dragging, event.rel)
+
+    def update_mousecursor(self, pos):
+        dragging = make_dragging(global_rects, pos)
+        cursor = cursor_from_dragging(dragging)
+        pygame.mouse.set_cursor(cursor)
 
     def update(self):
         pass
@@ -321,6 +330,80 @@ class TilingManagerState(RectStateBase):
         image = self.font.render(self.__class__.__name__, True, 'white')
         rect = image.get_rect(bottomright=self.frame.bottomright)
         self.screen.blit(image, rect)
+        pygame.display.flip()
+
+
+class RectJoinState(RectStateBase):
+    "Join rects with others that exactly share a side"
+
+    def __init__(self):
+        # XXX: dupes be here with RectCutState
+        self.font = pygame.font.SysFont('arial', 32)
+        self.screen = pygame.display.get_surface()
+        self.frame = self.screen.get_rect()
+        self.rect_renderer = RectRenderer(global_palettes['beach'])
+
+    def start(self):
+        self.clicked_rect = None
+        self.closest_rect_by_side = None
+
+    def on_keydown(self, event):
+        if event.key in (pygame.K_TAB, pygame.K_q):
+            post_stateswitch(RectCutState)
+        elif event.key == pygame.K_ESCAPE:
+            post_stateswitch(None)
+
+    def on_mousebuttondown(self, event):
+        if event.button != pygame.BUTTON_LEFT:
+            return
+        for rect in global_rects:
+            if rect.collidepoint(event.pos):
+                self.clicked_rect = rect
+                break
+        else:
+            self.clear_join()
+
+    def on_mousebuttonup(self, event):
+        if (
+            event.button == pygame.BUTTON_LEFT
+            and self.clicked_rect
+            and self.closest_rect_by_side
+        ):
+            new_rect = wrap(self.clicked_rect, self.closest_rect_by_side)
+            global_rects.remove(self.clicked_rect)
+            global_rects.remove(self.closest_rect_by_side)
+            global_rects.append(new_rect)
+        self.clear_join()
+
+    def clear_join(self):
+        self.clicked_rect = None
+        self.closest_rect_by_side = None
+
+    def on_mousemotion(self, event):
+        if not self.clicked_rect:
+            return
+
+        self.closest_rect_by_side = closest_join_rect(
+            self.clicked_rect, event.pos, global_rects
+        )
+
+        if self.closest_rect_by_side:
+            cursor = cursor_for_rect_diff(self.clicked_rect, self.closest_rect_by_side)
+            pygame.mouse.set_cursor(cursor)
+
+    def update(self):
+        pass
+
+    def draw(self):
+        self.screen.fill('black')
+        self.rect_renderer.render(self.screen, global_rects)
+        # this state's name
+        image = self.font.render(self.__class__.__name__, True, 'white')
+        rect = image.get_rect(bottomright=self.frame.bottomright)
+        self.screen.blit(image, rect)
+        #
+        if self.clicked_rect and self.closest_rect_by_side:
+            pygame.draw.rect(self.screen, 'magenta', self.closest_rect_by_side, 8)
         pygame.display.flip()
 
 
@@ -364,6 +447,55 @@ def first_or_none(iterable):
     except StopIteration:
         pass
 
+def closest_join_rect(rect, pos, rects):
+    # all rects the one that is clicked on can join to
+    joinable = [
+        other for other in rects
+        if other is not rect and shares_side(rect, other)
+    ]
+
+    # if the cursor is in exactly one of the joinable rects, indicate that one.
+    colliding_joinable = [other for other in joinable if other.collidepoint(pos)]
+    if len(colliding_joinable) == 1:
+        return colliding_joinable[0]
+    else:
+        # otherwise, choose the rect with the side closest to the cursor
+        def closest_side(rect):
+            closest_line_to_cursor = min(
+                distance_to_line(pos, side_line_getter(rect))
+                for side_line_getter in SIDES_ADJACENT_CORNERS_GETTERS.values()
+            )
+            return closest_line_to_cursor
+
+        closest_rect_by_side = min(joinable, key=closest_side)
+        return closest_rect_by_side
+
+def cursor_for_rect_diff(r1, r2):
+    dx = r1.x - r2.x
+    dy = r1.y - r2.y
+    assert dx == 0 or dy == 0
+    # there's no built cursors for point in one direction, just double
+    # pointers for WE and NS.
+    if dx:
+        cursor = pygame.SYSTEM_CURSOR_SIZEWE
+    else:
+        cursor = pygame.SYSTEM_CURSOR_SIZENS
+    return cursor
+
+def wrap(*rects):
+    """
+    Return bounding rect for rects.
+    """
+    sides = zip(*map(get_sides, rects))
+    tops, rights, bottoms, lefts = sides
+    top = min(tops)
+    right = max(rights)
+    bottom = max(bottoms)
+    left = min(lefts)
+    width = right - left
+    height = bottom - top
+    return pygame.Rect(left, top, width, height)
+
 def overlap(r1, r2):
     # assumes colliding
     _, left, right, _ = sorted([r1.left, r1.right, r2.left, r2.right])
@@ -397,6 +529,29 @@ def grouped_sides(rects):
         for side_value, sharing_rects in sorted_groupby(rects, key=side_getter)
     }
     return grouped_by_sides_and_values
+
+def grouped_side_lines(rects):
+    grouped = {
+        (side_name, line_value): list(sharing_rects)
+        for side_name, line_getter in SIDES_ADJACENT_CORNERS_GETTERS.items()
+        for line_value, sharing_rects in sorted_groupby(rects, key=line_getter)
+    }
+    return grouped
+
+def get_line_parts(p1, p2):
+    x1, y1 = p1
+    x2, y2 = p2
+    a = y1 - y2
+    b = x1 - x2
+    c = x1 * y2 - x2 * y1
+    return (a, b, c)
+
+def distance_to_line(point, line):
+    p1, p2 = line
+    x1, y1 = p1
+    x2, y2 = p2
+    a, b, c = get_line_parts(p1, p2)
+    return abs(a * x1 + b * y1 + c) / math.sqrt(a * a + b * b)
 
 def make_preview_cut_line(rect, pos, cut_side):
     # assumes pos(ition) colliding rect
@@ -437,6 +592,17 @@ def make_dragging(rects, pos):
     dragging = (closest_side_name, side_group, opposite_side_name, oppo_group)
     return dragging
 
+def cursor_from_dragging(dragging):
+    if not dragging:
+        cursor = pygame.SYSTEM_CURSOR_ARROW
+    else:
+        side, *ignore = dragging
+        if side in ('top', 'bottom'):
+            cursor = pygame.SYSTEM_CURSOR_SIZENS
+        else:
+            cursor = pygame.SYSTEM_CURSOR_SIZEWE
+    return cursor
+
 def tiling_drag(side1, group1, side2, group2, amount):
     args = [(group1, side1), (group2, side2)]
     for rectgroup, side in args:
@@ -475,17 +641,6 @@ def shares_side(r1, r2, threshold=0):
             and get_adjacents(r1) == get_adjacents(r2)
         ):
             return (side, oppo)
-
-def find_near_rect_side(rects, point, threshold):
-    pointdict = dict(zip('xy', point))
-    for rect in rects:
-        if rect.collidepoint(point):
-            for index, side in enumerate(SIDES):
-                side_value = getattr(rect, side)
-                side_pos_attr = SIDEPOS[index]
-                point_value = pointdict[side_pos_attr]
-                if abs(side_value - point_value) <= threshold:
-                    return (rect, side)
 
 def get_rect(*args, **kwargs):
     """
@@ -652,6 +807,12 @@ def cli():
 # sides to two-tuple attribute names, forming line for that side
 # e.g.: 'top' -> ('topleft', 'topright')
 SIDES_ADJACENT_CORNERS = {side: get_adjacent_corners(side) for side in SIDES}
+
+# side key -> a getter for that side's line
+# e.g.: 'top' -> attrgetter('topleft', 'topright')
+SIDES_ADJACENT_CORNERS_GETTERS = {
+    side: attrgetter(*attrs) for side, attrs in SIDES_ADJACENT_CORNERS.items()
+}
 
 if __name__ == '__main__':
     # unsure how to share between states, especially when the engine controls when
